@@ -50,8 +50,48 @@ class BiLSTMClassifier(nn.Module):
         out, _ = self.lstm(x)
         return self.classifier(out[:, -1, :])
     
+    # ==============================
+# CNN AUDIO MODEL (Spectrogram)
+# ==============================
 
+# ==============================
+# CNN AUDIO MODEL (Spectrogram)
+# ==============================
 
+class CNNClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 16, 3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(16, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+
+            # 🔥 FIX: 6 * 8 = 48. Flattened: 64 channels * 48 = 3072
+            nn.AdaptiveAvgPool2d((6, 8))  
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            # 🔥 FIX: Accepts the 3072 features expected by the checkpoint
+            nn.Linear(3072, 128),  
+            nn.ReLU(),
+            nn.Dropout(0.4),
+            nn.Linear(128, 2)
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
 # ==============================
 # OUR METHOD (TRANSFORMER)
 # ==============================
@@ -144,12 +184,28 @@ def pad_or_truncate(feat, max_frames=150):
 
 
 
+import io
+import soundfile as sf
+
 def load_audio(file):
 
-    audio, _ = librosa.load(
-        file,
-        sr=SR
-    )
+    file.seek(0)
+
+    audio, sr = sf.read(file)
+
+    # Ensure numpy array
+    audio = np.array(audio)
+
+    # Convert stereo → mono
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=1)
+
+    # Ensure float32
+    audio = audio.astype(np.float32)
+
+    # Resample
+    if sr != SR:
+        audio = librosa.resample(audio, orig_sr=sr, target_sr=SR)
 
     return audio
 
@@ -187,6 +243,34 @@ def preprocess_transformer(audio):
         mfcc,
         dtype=torch.float32
     ).unsqueeze(0)
+
+def preprocess_cnn_audio(audio):
+
+
+    # Ensure numpy float32
+    audio = np.ascontiguousarray(audio, dtype=np.float32)
+
+    # Mel Spectrogram
+    spec = librosa.feature.melspectrogram(
+        y=audio,
+        sr=SR,
+        n_mels=128
+    )
+
+    spec = librosa.power_to_db(spec, ref=np.max)
+
+    spec = librosa.util.fix_length(spec, size=128, axis=1)
+
+    # Normalize
+    spec = (spec - np.mean(spec)) / (np.std(spec) + 1e-6)
+
+    # 🔥 CONVERT TO TORCH TENSOR
+    spec = torch.from_numpy(spec).float()
+
+    # Add channel + batch dimension
+    spec = spec.unsqueeze(0).unsqueeze(0)
+
+    return spec
 
 
 # ==============================
@@ -235,6 +319,17 @@ def load_models():
         MODEL_DIR / "scaler.pkl"
     )
 
+    # CNN AUDIO
+    cnn_audio = CNNClassifier()
+   # Temporary fix
+    cnn_audio.load_state_dict(
+    torch.load(MODEL_DIR / "cnn_model.pth", map_location="cpu"),
+    strict=False
+)
+    cnn_audio.eval()
+
+    models["Spectrogram-CNN"] = cnn_audio
+
 
     return models, scaler
 
@@ -245,49 +340,35 @@ def load_models():
 
 
 def predict_all(models, scaler, audio):
-
     results = {}
 
+    # --- 1. DEEP LEARNING MODELS (No Scaler Needed) ---
     lstm_input = preprocess_lstm(audio)
     transformer_input = preprocess_transformer(audio)
+    cnn_input = preprocess_cnn_audio(audio)
 
-    # LSTM
-    prob = F.softmax(
-        models["Bi-LSTM"](lstm_input),
-        dim=1
-    ).detach().numpy()[0]
+    results["Bi-LSTM"] = F.softmax(models["Bi-LSTM"](lstm_input), dim=1).detach().numpy()[0]
+    results["Spectrogram-CNN"] = F.softmax(models["Spectrogram-CNN"](cnn_input), dim=1).detach().numpy()[0]
+    results["Attention Model"] = F.softmax(models["Attention Model"](transformer_input), dim=1).detach().numpy()[0]
 
-    results["Bi-LSTM"] = prob
+    # --- 2. CLASSICAL MODELS (SCALER INTEGRATION) ---
+    try:
+        # Extract features - IMPORTANT: n_mfcc must match your training (usually 20 or 40)
+        mfcc = librosa.feature.mfcc(y=audio, sr=SR, n_mfcc=40)
+        feat = np.mean(mfcc, axis=1).reshape(1, -1)
 
-    # Transformer
-    prob = F.softmax(
-        models["Attention Model"](transformer_input),
-        dim=1
-    ).detach().numpy()[0]
+        # Apply the scaler from your models folder
+        feat_scaled = scaler.transform(feat)
 
-    results["Attention Model"] = prob
-
-    # Classical feature
-    mfcc = librosa.feature.mfcc(
-        y=audio,
-        sr=SR,
-        n_mfcc=40
-    )
-
-    feat = np.mean(
-        mfcc,
-        axis=1
-    ).reshape(1, -1)
-
-    feat = scaler.transform(feat)
-
-    # SVM
-    prob = models["SVM"].predict_proba(feat)[0]
-    results["SVM"] = prob
-
-    # Random Forest
-    prob = models["Random Forest"].predict_proba(feat)[0]
-    results["Random Forest"] = prob
+        # Get probabilities from SVM and RF using the scaled features
+        results["SVM"] = models["SVM"].predict_proba(feat_scaled)[0]
+        results["Random Forest"] = models["Random Forest"].predict_proba(feat_scaled)[0]
+        
+    except Exception as e:
+        st.error(f"Error in Scaler/Classical models: {e}")
+        # Fallback so the app doesn't crash
+        results["SVM"] = np.array([0.5, 0.5])
+        results["Random Forest"] = np.array([0.5, 0.5])
 
     return results
 
