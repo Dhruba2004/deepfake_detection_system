@@ -189,7 +189,7 @@ def load_text_models():
         models["Logistic Regression"] = joblib.load(TEXT_MODEL_DIR / "logistic_regression.pkl")
         models["SVM"] = joblib.load(TEXT_MODEL_DIR / "svm_model.pkl")
         models["Our Method"] = joblib.load(TEXT_MODEL_DIR / "our_method_model.pkl")
-        models["LSTM"] = load_model(TEXT_MODEL_DIR / "lstm_model.keras", safe_mode=False)
+        models["LSTM"] = keras.models.load_model(TEXT_MODEL_DIR / "lstm_model.keras", safe_mode=False)
 
         return models, tfidf_vectorizer, our_method_scaler, tokenizer
     except Exception as e:
