@@ -2,9 +2,9 @@ torch
 torchaudio
 torchcodec
 librosa
-numpy<2.0.0
+numpy
 scikit-learn
 joblib
-tensorflow>=2.20.0
-keras>=3.0.0
+tensorflow
+keras
 soundfile
