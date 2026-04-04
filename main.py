@@ -15,13 +15,13 @@ import importlib
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Hide TF warnings
 try:
-    tf = importlib.import_module("tensorflow")
-    load_model = tf.keras.models.load_model
-    pad_sequences = tf.keras.preprocessing.sequence.pad_sequences
+    import keras
+    import tensorflow as tf
+    load_model = keras.models.load_model
+    # Keras 3 moved pad_sequences to utils
+    pad_sequences = keras.utils.pad_sequences 
 except ImportError:
-    load_model = None
-    pad_sequences = None
-    st.error("TensorFlow is not installed. Please run `pip install tensorflow`.")
+    st.error("Deep learning libraries not found. Run: pip install tensorflow keras")
 
 # ==============================
 # CONFIG
@@ -190,9 +190,7 @@ def load_text_models():
         models["Logistic Regression"] = joblib.load(TEXT_MODEL_DIR / "logistic_regression.pkl")
         models["SVM"] = joblib.load(TEXT_MODEL_DIR / "svm_model.pkl")
         models["Our Method"] = joblib.load(TEXT_MODEL_DIR / "our_method_model.pkl")
-
-        # Deep Learning Models
-        models["LSTM"] = load_model(TEXT_MODEL_DIR / "lstm_model.keras")
+        models["LSTM"] = load_model(TEXT_MODEL_DIR / "lstm_model.keras", safe_mode=False)
 
         return models, tfidf_vectorizer, our_method_scaler, tokenizer
     except Exception as e:
