@@ -15,7 +15,6 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Hide TF warnings
 try:
     import keras
-    import tensorflow as tf
     load_model = keras.models.load_model
     # Keras 3 moved pad_sequences to utils
     pad_sequences = keras.utils.pad_sequences 
