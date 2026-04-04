@@ -11,7 +11,6 @@ import soundfile as sf
 import pickle
 
 # --- NEW IMPORTS FOR TEXT DETECTION ---
-import importlib
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Hide TF warnings
 try:
