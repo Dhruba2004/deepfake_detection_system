@@ -3,3 +3,4 @@ torchaudio
 torchcodec
 numpy
 librosa
+tensorflow
