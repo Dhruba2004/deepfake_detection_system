@@ -1,4 +1,6 @@
 torch
+torchvision
+Pillow
 torchaudio
 torchcodec
 librosa

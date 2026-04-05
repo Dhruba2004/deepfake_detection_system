@@ -10,6 +10,11 @@ import io
 import soundfile as sf
 import pickle
 
+# --- NEW IMPORTS FOR IMAGE DETECTION ---
+from PIL import Image
+import torchvision.transforms as transforms
+import torchvision.models as tv_models
+
 # --- NEW IMPORTS FOR TEXT DETECTION ---
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Hide TF warnings
@@ -27,6 +32,8 @@ except ImportError:
 
 AUDIO_MODEL_DIR = Path("models/audio_models")
 TEXT_MODEL_DIR = Path("models/text_models")
+IMAGE_MODEL_DIR = Path("models/image_models")
+
 DEVICE = torch.device("cpu")
 
 MAX_FRAMES = 150
@@ -55,8 +62,6 @@ class BiLSTMClassifier(nn.Module):
         out, _ = self.lstm(x)
         return self.classifier(out[:, -1, :])
     
-
-
 class CNNClassifier(nn.Module):
     def __init__(self):
         super().__init__()
@@ -71,8 +76,6 @@ class CNNClassifier(nn.Module):
         )
     def forward(self, x):
         return self.classifier(self.features(x))
-
-
 
 class OurMethodClassifier(nn.Module):
     def __init__(self, input_size=60, d_model=64, nhead=4, num_layers=2, num_classes=2, max_frames=150):
@@ -98,6 +101,26 @@ class OurMethodClassifier(nn.Module):
         x = self.transformer(x)
         x = x.mean(dim=1)
         return self.classifier(x)
+
+# ==============================
+# IMAGE MODELS DEFINITION
+# ==============================
+
+class ImageCNNClassifier(nn.Module):
+   def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(3,32,3,padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32,64,3,padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(64,128,3,padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Flatten(),
+            nn.Linear(128*28*28, 128),
+            nn.ReLU(),
+            nn.Linear(128,2)
+        )
+
+def forward(self,x):
+        return self.net(x)
 
 # ==============================
 # AUDIO PREPROCESSING
@@ -141,8 +164,42 @@ def preprocess_cnn_audio(audio):
     spec = spec.unsqueeze(0).unsqueeze(0)
     return spec
 
+def preprocess_for_dl(image):
+    """
+    Standardizes the image height and width to 224x224 and 
+    converts it to a format the Deep Learning models understand.
+    """
+    transform = transforms.Compose([
+        # This 'fixes' the height and width to 224x224
+        transforms.Resize((224, 224)), 
+        transforms.ToTensor(),
+        # Standard normalization for ImageNet-based models
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                             std=[0.229, 0.224, 0.225])
+    ])
+    # Ensure image is RGB (removes alpha channel from PNGs)
+    image = image.convert('RGB')
+    
+    # Returns the image with a 'batch' dimension added: [1, 3, 224, 224]
+    return transform(image).unsqueeze(0)
 # ==============================
-# LOAD MODELS (AUDIO & TEXT)
+# IMAGE PREPROCESSING
+# ==============================
+
+def preprocess_image(image):
+    # Standard deep learning image transforms
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
+    ])
+    # Ensure image is RGB
+    image = image.convert('RGB')
+    return transform(image).unsqueeze(0)
+
+# ==============================
+# LOAD MODELS (AUDIO, IMAGE & TEXT)
 # ==============================
 
 @st.cache_resource
@@ -173,17 +230,74 @@ def load_audio_models():
         return {}, None
 
 @st.cache_resource
-def load_text_models():
+def load_image_models():
     models = {}
     
+    # 1. ResNet-50 (Fixed from ResNet-18 based on your error log)
     try:
-        # Vectorizers & Scalers
+        resnet = tv_models.resnet50(weights=None)
+        resnet.fc = nn.Linear(2048, 2)
+        resnet.load_state_dict(torch.load(IMAGE_MODEL_DIR / "resnet_trained.pth", map_location=DEVICE))
+        resnet.eval()
+        models["ResNet"] = resnet
+    except Exception as e:
+        st.error(f"ResNet Error: {e}")
+
+    # 2. VGG16 (New)
+    try:
+        vgg_path = IMAGE_MODEL_DIR / "vgg_trained.pth"
+        if vgg_path.exists():
+            vgg = tv_models.vgg16(weights=None)
+            # VGG16 classifier: [0] Linear, [3] Linear, [6] Linear (Output)
+            n_inputs = vgg.classifier[6].in_features
+            vgg.classifier[6] = nn.Linear(n_inputs, 2)
+            vgg.load_state_dict(torch.load(vgg_path, map_location=DEVICE))
+            vgg.eval()
+            models["VGG16"] = vgg
+    except Exception as e:
+        st.error(f"VGG16 Error: {e}")
+
+    # 3. EfficientNet
+    try:
+        effnet = tv_models.efficientnet_b0(weights=None)
+        effnet.classifier[1] = nn.Linear(effnet.classifier[1].in_features, 2)
+        effnet.load_state_dict(torch.load(IMAGE_MODEL_DIR / "efficientnet_trained.pth", map_location=DEVICE))
+        effnet.eval()
+        models["EfficientNet"] = effnet
+    except Exception as e:
+        st.error(f"EfficientNet Error: {e}")
+
+    # 4. Custom CNN
+    try:
+        custom_cnn = ImageCNNClassifier()
+        custom_cnn.load_state_dict(torch.load(IMAGE_MODEL_DIR / "cnn_trained.pth", map_location=DEVICE))
+        custom_cnn.eval()
+        models["Custom CNN"] = custom_cnn
+    except Exception as e:
+        st.error(f"Custom CNN Error: {e}")
+
+        # 4. Load SVM
+    try:
+        svm_path = IMAGE_MODEL_DIR / "svm_trained.pkl"
+        if svm_path.exists():
+            # joblib is used for .pkl files
+            models["SVM"] = joblib.load(svm_path)
+        else:
+            st.warning("svm_trained.pkl not found in models/image_models/")
+    except Exception as e:
+        st.error(f"SVM Loading Error: {e}")
+
+    return models
+
+@st.cache_resource
+def load_text_models():
+    models = {}
+    try:
         tfidf_vectorizer = joblib.load(TEXT_MODEL_DIR / "tfidf_vectorizer.pkl")
         our_method_scaler = joblib.load(TEXT_MODEL_DIR / "our_method_scaler.pkl")
         with open(TEXT_MODEL_DIR / "lstm_tokenizer.pkl", "rb") as f:
             tokenizer = pickle.load(f)
 
-        # Classical ML Models
         models["Naive Bayes"] = joblib.load(TEXT_MODEL_DIR / "naive_bayes.pkl")
         models["Logistic Regression"] = joblib.load(TEXT_MODEL_DIR / "logistic_regression.pkl")
         models["SVM"] = joblib.load(TEXT_MODEL_DIR / "svm_model.pkl")
@@ -201,7 +315,6 @@ def load_text_models():
 
 def predict_all_audio(models, scaler, audio):
     results = {}
-    
     lstm_input = preprocess_lstm(audio)
     transformer_input = preprocess_transformer(audio)
     cnn_input = preprocess_cnn_audio(audio)
@@ -223,41 +336,85 @@ def predict_all_audio(models, scaler, audio):
 
     return results
 
-def predict_all_text(models, tfidf, scaler, tokenizer, text):
+def predict_all_image(models, image):
     results = {}
     
-    # Text -> TF-IDF
+    dl_input = preprocess_for_dl(image).to(DEVICE)
+    
+    with torch.no_grad():
+        # ... (Keep ResNet, EfficientNet, Custom CNN) ...
+        
+        # 4. VGG16 Prediction
+        if "VGG16" in models:
+            out = models["VGG16"](dl_input)
+            results["VGG16"] = F.softmax(out, dim=1).cpu().numpy()[0]
+
+    
+    img_tensor = preprocess_image(image).to(DEVICE)
+    
+    # Evaluate PyTorch models
+    with torch.no_grad():
+        if "ResNet" in models:
+            try:
+                out = models["ResNet"](img_tensor)
+                results["ResNet"] = F.softmax(out, dim=1).cpu().numpy()[0]
+            except Exception:
+                results["ResNet"] = np.array([0.5, 0.5])
+
+        if "EfficientNet" in models:
+            try:
+                out = models["EfficientNet"](img_tensor)
+                results["EfficientNet"] = F.softmax(out, dim=1).cpu().numpy()[0]
+            except Exception:
+                results["EfficientNet"] = np.array([0.5, 0.5])
+                
+        if "Custom CNN" in models:
+            try:
+                out = models["Custom CNN"](img_tensor)
+                results["Custom CNN"] = F.softmax(out, dim=1).cpu().numpy()[0]
+            except Exception:
+                results["Custom CNN"] = np.array([0.5, 0.5])
+
+    # Evaluate scikit-learn SVM model
+    if "SVM" in models:
+        try:
+            # Note: This simply flattens the image arrays. If you trained SVM on
+            # feature extractor embeddings (e.g., from ResNet), you should extract 
+            # those features here before calling predict_proba.
+            img_flat = img_tensor.cpu().numpy().flatten().reshape(1, -1)
+            
+            if hasattr(models["SVM"], "predict_proba"):
+                results["SVM"] = models["SVM"].predict_proba(img_flat)[0]
+            else:
+                pred = models["SVM"].predict(img_flat)[0]
+                results["SVM"] = np.array([1.0, 0.0]) if pred == 0 else np.array([0.0, 1.0])
+        except Exception:
+            results["SVM"] = np.array([0.5, 0.5])
+
+    return results
+
+def predict_all_text(models, tfidf, scaler, tokenizer, text):
+    results = {}
     text_tfidf = tfidf.transform([text])
-    
-    # Naive Bayes
     results["Naive Bayes"] = models["Naive Bayes"].predict_proba(text_tfidf)[0]
-    
-    # Logistic Regression
     results["Logistic Regression"] = models["Logistic Regression"].predict_proba(text_tfidf)[0]
     
-    # SVM (LinearSVC typically uses decision_function, fallback for binary)
     try:
         pred_svm = models["SVM"].predict(text_tfidf)[0]
-        # Simulate probabilities based on prediction (assuming 0=Real, 1=Fake)
         results["SVM"] = np.array([1.0, 0.0]) if pred_svm == 0 else np.array([0.0, 1.0])
     except Exception:
         results["SVM"] = np.array([0.5, 0.5])
 
-    # Our Method
     try:
         text_scaled = scaler.transform(text_tfidf.toarray())
         results["Our Method"] = models["Our Method"].predict_proba(text_scaled)[0]
     except Exception:
         results["Our Method"] = np.array([0.5, 0.5])
 
-    # LSTM Preprocessing & Prediction
     try:
         seq = tokenizer.texts_to_sequences([text])
-        # Using 300 based on standard shape inputs detected for this type
         padded_seq = pad_sequences(seq, maxlen=300) 
         lstm_pred = models["LSTM"].predict(padded_seq, verbose=0)[0]
-        
-        # Handle binary (1 output node) vs categorical (2 output nodes)
         if len(lstm_pred) == 1:
             prob_fake = lstm_pred[0]
             results["LSTM"] = np.array([1.0 - prob_fake, prob_fake])
@@ -330,18 +487,68 @@ with tabs[0]:
             st.warning("Audio models not found. Please check paths.")
 
 # ==============================
-# IMAGE TAB
+# IMAGE TAB (UPDATED)
 # ==============================
 with tabs[1]:
     st.header("Image Deepfake Detection")
     image_file = st.file_uploader("Upload Image", type=["jpg", "jpeg", "png"], key="image")
 
     if image_file is not None:
-        st.image(image_file, caption="Uploaded Image", use_column_width=True)
-        st.info("⚠️ Image detection model not added yet.")
+        try:
+            image = Image.open(image_file)
+            st.image(image, caption="Uploaded Image", use_container_width=True)
+            
+            with st.spinner("Analyzing image using multi-model voting..."):
+                img_models = load_image_models()
+                
+                if img_models:
+                    results = predict_all_image(img_models, image)
+
+                    st.subheader("DETECTION RESULTS")
+                    st.markdown("="*60)
+                    st.write(f"**File:** {image_file.name}")
+                    st.markdown("="*60)
+
+                    votes = {"REAL": 0, "FAKE": 0}
+
+                    for i, (name, prob) in enumerate(results.items(), start=1):
+                        # Index 0: Real/Bonafide, Index 1: Fake/Spoof
+                        real_score = prob[0] * 100
+                        fake_score = prob[1] * 100
+                        verdict = "REAL" if real_score > fake_score else "FAKE"
+                        votes[verdict] += 1
+                        color = "🟢" if verdict == "REAL" else "🔴"
+
+                        st.markdown(f"""
+                        **METHOD {i} — {name}** Verdict : {color} {verdict}  
+                        Real : {real_score:.1f}% {'█' * int(real_score // 5)}  
+                        Fake : {fake_score:.1f}% {'█' * int(fake_score // 5)}  
+                        """)
+
+                    st.markdown("="*60)
+                    
+                    total_models = len(results)
+                    real_votes = votes["REAL"]
+                    fake_votes = votes["FAKE"]
+
+                    final_verdict = "REAL" if real_votes > fake_votes else "FAKE"
+                    final_color = "🟢" if final_verdict == "REAL" else "🔴"
+
+                    st.markdown(f"""
+                    **MAJORITY VOTE ({total_models} models)** Real votes : {real_votes}/{total_models}  
+                    Fake votes : {fake_votes}/{total_models}  
+
+                    ### ✔ FINAL VERDICT : {final_color} {final_verdict}
+                    """)
+                    st.markdown("="*60)
+                else:
+                    st.warning("Image models could not be loaded. Ensure the .pth and .pkl files are in 'models/image_models/' directory.")
+        
+        except Exception as e:
+            st.error(f"Error processing the image: {e}")
 
 # ==============================
-# TEXT TAB (UPDATED)
+# TEXT TAB
 # ==============================
 with tabs[2]:
     st.header("Fake Text Detection")
@@ -363,7 +570,6 @@ with tabs[2]:
                     votes = {"HUMAN-WRITTEN (REAL)": 0, "AI-GENERATED (FAKE)": 0}
 
                     for i, (name, prob) in enumerate(results.items(), start=1):
-                        # Standard convention: index 0 is Real/Bonafide, index 1 is Fake/Spoof
                         real_score = prob[0] * 100
                         fake_score = prob[1] * 100
                         
