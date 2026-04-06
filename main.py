@@ -107,19 +107,19 @@ class OurMethodClassifier(nn.Module):
 # ==============================
 
 class ImageCNNClassifier(nn.Module):
-   def __init__(self):
+    def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(3,32,3,padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(32,64,3,padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(64,128,3,padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(3, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
             nn.Flatten(),
-            nn.Linear(128*28*28, 128),
+            nn.Linear(128 * 28 * 28, 128),
             nn.ReLU(),
-            nn.Linear(128,2)
+            nn.Linear(128, 2)
         )
 
-def forward(self,x):
+    def forward(self, x):
         return self.net(x)
 
 # ==============================
@@ -165,22 +165,13 @@ def preprocess_cnn_audio(audio):
     return spec
 
 def preprocess_for_dl(image):
-    """
-    Standardizes the image height and width to 224x224 and 
-    converts it to a format the Deep Learning models understand.
-    """
     transform = transforms.Compose([
-        # This 'fixes' the height and width to 224x224
-        transforms.Resize((224, 224)), 
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        # Standard normalization for ImageNet-based models
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                             std=[0.229, 0.224, 0.225])
+        # Removing normalization for now, as it often distorts raw phone 
+        # images if the model wasn't explicitly trained on ImageNet stats
     ])
-    # Ensure image is RGB (removes alpha channel from PNGs)
     image = image.convert('RGB')
-    
-    # Returns the image with a 'batch' dimension added: [1, 3, 224, 224]
     return transform(image).unsqueeze(0)
 # ==============================
 # IMAGE PREPROCESSING
@@ -339,59 +330,40 @@ def predict_all_audio(models, scaler, audio):
 def predict_all_image(models, image):
     results = {}
     
-    dl_input = preprocess_for_dl(image).to(DEVICE)
+    # 1. Preprocessing (matching your model's 224x224 input)
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
+    dl_input = transform(image.convert('RGB')).unsqueeze(0).to(DEVICE)
     
     with torch.no_grad():
-        # ... (Keep ResNet, EfficientNet, Custom CNN) ...
-        
-        # 4. VGG16 Prediction
-        if "VGG16" in models:
-            out = models["VGG16"](dl_input)
-            results["VGG16"] = F.softmax(out, dim=1).cpu().numpy()[0]
+        # Deep Learning Models (ResNet, VGG, Custom CNN)
+        for name in ["ResNet", "EfficientNet", "VGG16", "Custom CNN"]:
+            if name in models:
+                output = models[name](dl_input)
+                prob = F.softmax(output, dim=1).cpu().numpy()[0]
+                results[name] = prob
 
-    
-    img_tensor = preprocess_image(image).to(DEVICE)
-    
-    # Evaluate PyTorch models
-    with torch.no_grad():
-        if "ResNet" in models:
-            try:
-                out = models["ResNet"](img_tensor)
-                results["ResNet"] = F.softmax(out, dim=1).cpu().numpy()[0]
-            except Exception:
-                results["ResNet"] = np.array([0.5, 0.5])
-
-        if "EfficientNet" in models:
-            try:
-                out = models["EfficientNet"](img_tensor)
-                results["EfficientNet"] = F.softmax(out, dim=1).cpu().numpy()[0]
-            except Exception:
-                results["EfficientNet"] = np.array([0.5, 0.5])
-                
-        if "Custom CNN" in models:
-            try:
-                out = models["Custom CNN"](img_tensor)
-                results["Custom CNN"] = F.softmax(out, dim=1).cpu().numpy()[0]
-            except Exception:
-                results["Custom CNN"] = np.array([0.5, 0.5])
-
-    # Evaluate scikit-learn SVM model
+    # 2. SVM Model (Specific handling for flattened input)
+    # Inside predict_all_image, replace the SVM block:
     if "SVM" in models:
         try:
-            # Note: This simply flattens the image arrays. If you trained SVM on
-            # feature extractor embeddings (e.g., from ResNet), you should extract 
-            # those features here before calling predict_proba.
-            img_flat = img_tensor.cpu().numpy().flatten().reshape(1, -1)
+            svm_img = image.convert('RGB').resize((64, 64))
+            svm_input = np.array(svm_img).flatten().reshape(1, -1)
+            pred = models["SVM"].predict(svm_input)[0]
             
-            if hasattr(models["SVM"], "predict_proba"):
-                results["SVM"] = models["SVM"].predict_proba(img_flat)[0]
-            else:
-                pred = models["SVM"].predict(img_flat)[0]
-                results["SVM"] = np.array([1.0, 0.0]) if pred == 0 else np.array([0.0, 1.0])
-        except Exception:
-            results["SVM"] = np.array([0.5, 0.5])
+            # Assuming your SVM was trained with 0=Real, 1=Fake:
+            # We swap them here so they match the DL models (0=Fake, 1=Real)
+            if pred == 0: # If SVM says Real
+                results["SVM"] = np.array([0.0, 1.0]) # Index 1 is Real
+            else: # If SVM says Fake
+                results["SVM"] = np.array([1.0, 0.0]) # Index 0 is Fake
+        except Exception as e:
+            st.error(f"SVM Prediction Error: {e}")
 
     return results
+
 
 def predict_all_text(models, tfidf, scaler, tokenizer, text):
     results = {}
@@ -424,6 +396,8 @@ def predict_all_text(models, tfidf, scaler, tokenizer, text):
         results["LSTM"] = np.array([0.5, 0.5])
 
     return results
+
+
 
 # ==============================
 # UI WITH TABS
@@ -509,12 +483,15 @@ with tabs[1]:
                     st.write(f"**File:** {image_file.name}")
                     st.markdown("="*60)
 
+                    # Inside your tabs[1] where you print the results:
+                    # Inside tabs[1] result loop:
                     votes = {"REAL": 0, "FAKE": 0}
-
                     for i, (name, prob) in enumerate(results.items(), start=1):
-                        # Index 0: Real/Bonafide, Index 1: Fake/Spoof
-                        real_score = prob[0] * 100
-                        fake_score = prob[1] * 100
+                        # --- THE CRITICAL FIX ---
+                        fake_score = prob[0] * 100  # Index 0 is Fake
+                        real_score = prob[1] * 100  # Index 1 is Real
+                        # ------------------------
+                        
                         verdict = "REAL" if real_score > fake_score else "FAKE"
                         votes[verdict] += 1
                         color = "🟢" if verdict == "REAL" else "🔴"
