@@ -6,9 +6,12 @@ import numpy as np
 import librosa
 import joblib
 from pathlib import Path
+import numpy as np
+import cv2
 import io
 import soundfile as sf
 import pickle
+from torchvision.transforms import InterpolationMode
 
 # --- NEW IMPORTS FOR IMAGE DETECTION ---
 from PIL import Image
@@ -165,29 +168,37 @@ def preprocess_cnn_audio(audio):
     return spec
 
 def preprocess_for_dl(image):
+    # This must match your training exactly
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        # Removing normalization for now, as it often distorts raw phone 
-        # images if the model wasn't explicitly trained on ImageNet stats
+        # THE FIX: Standard ImageNet normalization used by ResNet/VGG/EfficientNet
     ])
-    image = image.convert('RGB')
-    return transform(image).unsqueeze(0)
-# ==============================
-# IMAGE PREPROCESSING
-# ==============================
+    
+    # Ensure image is RGB before transforming
+    img_tensor = transform(image.convert('RGB')).unsqueeze(0).to(DEVICE)
+    return img_tensor
 
-def preprocess_image(image):
-    # Standard deep learning image transforms
+
+
+def preprocess_image(uploaded_file):
+    # 1. Open with PIL (Matches your existing Streamlit setup)
+    img = Image.open(uploaded_file).convert('RGB')
+    
+    # 2. Convert to NumPy array to ensure it's handled as a raw matrix 
+    # (This mimics the 'feel' of the cv2 data your model liked in Colab)
+    img_array = np.array(img)
+    
+    # 3. Use the exact same transform from your working Colab script
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
     ])
-    # Ensure image is RGB
-    image = image.convert('RGB')
-    return transform(image).unsqueeze(0)
+    
+    # 4. Convert back to PIL for the transform (ToTensor handles PIL best)
+    img_pil = Image.fromarray(img_array)
+    
+    return transform(img_pil).unsqueeze(0).to(DEVICE)
 
 # ==============================
 # LOAD MODELS (AUDIO, IMAGE & TEXT)
@@ -327,40 +338,51 @@ def predict_all_audio(models, scaler, audio):
 
     return results
 
+import numpy as np
+
+from torchvision.transforms import InterpolationMode
+
+from PIL import ImageOps
+
 def predict_all_image(models, image):
     results = {}
     
-    # 1. Preprocessing (matching your model's 224x224 input)
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+    # 1. FIX ORIENTATION (Crucial for camera photos)
+    img_rgb = ImageOps.exif_transpose(image).convert('RGB')
+
+    # 2. DEFINE THE SYNCED TRANSFORM
+    # We remove Normalize because your training code used ToTensor() only.
+    # We use LANCZOS to keep the image sharp for the models.
+    transform_sync = transforms.Compose([
+        transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.LANCZOS),
         transforms.ToTensor(),
     ])
-    dl_input = transform(image.convert('RGB')).unsqueeze(0).to(DEVICE)
-    
+
+    # Pre-process the image once
+    input_tensor = transform_sync(img_rgb).unsqueeze(0).to(DEVICE)
+
     with torch.no_grad():
-        # Deep Learning Models (ResNet, VGG, Custom CNN)
         for name in ["ResNet", "EfficientNet", "VGG16", "Custom CNN"]:
             if name in models:
-                output = models[name](dl_input)
-                prob = F.softmax(output, dim=1).cpu().numpy()[0]
-                results[name] = prob
+                model = models[name]
+                output = model(input_tensor)
+                probs = F.softmax(output, dim=1).cpu().numpy()[0]
+                
+                # Based on your training list ["real", "fake"]:
+                # Index 0 = REAL, Index 1 = FAKE
+                results[name] = np.array([probs[0], probs[1]])
 
-    # 2. SVM Model (Specific handling for flattened input)
-    # Inside predict_all_image, replace the SVM block:
+    # 3. SVM HANDLING
     if "SVM" in models:
         try:
-            svm_img = image.convert('RGB').resize((64, 64))
-            svm_input = np.array(svm_img).flatten().reshape(1, -1)
+            # SVM expects a flat 0-1 array
+            svm_img = img_rgb.resize((64, 64), resample=Image.Resampling.LANCZOS)
+            svm_input = np.array(svm_img).flatten().reshape(1, -1) / 255.0
             pred = models["SVM"].predict(svm_input)[0]
-            
-            # Assuming your SVM was trained with 0=Real, 1=Fake:
-            # We swap them here so they match the DL models (0=Fake, 1=Real)
-            if pred == 0: # If SVM says Real
-                results["SVM"] = np.array([0.0, 1.0]) # Index 1 is Real
-            else: # If SVM says Fake
-                results["SVM"] = np.array([1.0, 0.0]) # Index 0 is Fake
+            # Match index 0=Real, 1=Fake logic
+            results["SVM"] = np.array([1.0, 0.0]) if pred == 0 else np.array([0.0, 1.0])
         except Exception as e:
-            st.error(f"SVM Prediction Error: {e}")
+            st.error(f"SVM Error: {e}")
 
     return results
 
@@ -488,8 +510,8 @@ with tabs[1]:
                     votes = {"REAL": 0, "FAKE": 0}
                     for i, (name, prob) in enumerate(results.items(), start=1):
                         # --- THE CRITICAL FIX ---
-                        fake_score = prob[0] * 100  # Index 0 is Fake
-                        real_score = prob[1] * 100  # Index 1 is Real
+                        real_score = prob[0] * 100  # Index 0 is Real
+                        fake_score = prob[1] * 100  # Index 1 is Fake
                         # ------------------------
                         
                         verdict = "REAL" if real_score > fake_score else "FAKE"

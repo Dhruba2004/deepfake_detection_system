@@ -10,3 +10,4 @@ joblib
 tensorflow
 keras
 soundfile
+opencv-python-headless
