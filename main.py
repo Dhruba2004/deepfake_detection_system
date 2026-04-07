@@ -354,7 +354,8 @@ def predict_all_image(models, image):
     # We remove Normalize because your training code used ToTensor() only.
     # We use LANCZOS to keep the image sharp for the models.
     transform_sync = transforms.Compose([
-        transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.LANCZOS),
+        transforms.Resize((224, 224)), 
+        transforms.GaussianBlur(kernel_size=(3, 3), sigma=(0.8, 0.8)),
         transforms.ToTensor(),
     ])
 
@@ -514,7 +515,7 @@ with tabs[1]:
                         fake_score = prob[1] * 100  # Index 1 is Fake
                         # ------------------------
                         
-                        verdict = "REAL" if real_score > fake_score else "FAKE"
+                        verdict = "FAKE" if fake_score > real_score else "REAL"
                         votes[verdict] += 1
                         color = "🟢" if verdict == "REAL" else "🔴"
 
